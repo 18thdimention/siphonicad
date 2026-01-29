@@ -1,0 +1,101 @@
+// Reynolds number and velocity head
+for (const c of updated) {
+  const di = c.di ?? 0;
+  const V = c.V ?? 0;
+  c.Re = di === 0 ? 0 : (di * V) / 0.000001;
+  c.vp = (V * V) / (2 * 9.81);
+}
+
+// Darcy friction factor (only for pipes)
+for (const c of updated) {
+  if (c.item === "pipe") {
+    const Q = c.Q ?? 0;
+    const d = c.d ?? 0;
+    const Re = c.Re ?? 0;
+    if (d > 0 && Re > 0) {
+      const inner = 0.86 * Math.log(0.2 / (d * 3.7) + 5.74 / Math.pow(Re, 0.9));
+      c.f = 1 / Math.pow(inner, 2);
+    } else {
+      c.f = 0;
+    }
+  } else {
+    c.f = c.f ?? 0;
+  }
+}
+
+// Ensure discharge node has area ratio 1 before computing reducer losses,
+// so its kred is derived from a = 1.
+for (const c of updated) {
+  if (c.item === "discharge") {
+    c.a = 1;
+  }
+}
+
+// Reducer loss coefficient
+for (const c of updated) {
+  const a = c.a ?? 0;
+  if (a > 1) {
+    c.kred = Math.pow(a - 1, 2);
+  } else if (a === 1) {
+    c.kred = 0;
+  } else {
+    c.kred = -0.513 * a + 0.51;
+  }
+}
+
+// Tee loss coefficient
+const T = 1; // Placeholder constant to avoid undefined; domain value can replace this.
+for (const c of updated) {
+  if (c.item && c.item.startsWith("tee")) {
+    const d90 = c.d90 ?? 0;
+    const d = c.d ?? 0;
+    if (d === 0) continue;
+    const a = Math.pow(d90 / d, 2);
+
+    if (c.t90 === 1) {
+      const q90 = c.q90 ?? 0;
+      const multiplier = a > 0.35 ? 0.55 : 1;
+
+      c.ktee =
+        multiplier *
+        (1 + Math.pow(q90 / a, 2) - 2 * Math.pow(1 - q90, 2) - (1.414 * Math.pow(q90, 2)) / T);
+    } else if (c.t90 === 0.5) {
+      if (d90 !== 0) {
+        c.ktee = 0.75 - 0.35 / a;
+      }
+    }
+  }
+}
+
+// Total loss coefficient and head loss
+if (updated.length > 0) {
+  updated[0].ktotal = updated[0].ktotal ?? 1;
+}
+
+for (const c of updated) {
+  const vp = c.vp ?? 0;
+
+  // For the discharge node, force area ratio and ktotal to 1 so it
+  // behaves as a pure reference/entry point regardless of upstream
+  // geometry.
+  if (c.item === "discharge") {
+    c.a = 1;
+    c.ktotal = 1;
+    c.delta_H = c.ktotal * vp;
+    continue;
+  }
+
+  const f = c.f ?? 0;
+  const L = c.L ?? 0;
+  const di = c.di ?? 0;
+  const elbow = c.elbow ?? 0;
+  const kred = c.kred ?? 0;
+  const ktee = c.ktee ?? 0;
+
+  const major = di === 0 ? 0 : f * (L / di);
+  const minor = elbow * 0.2 + kred + ktee;
+  c.ktotal = major + minor;
+  c.delta_H = c.ktotal * vp;
+}
+
+

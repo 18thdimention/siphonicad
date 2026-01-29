@@ -1,0 +1,9 @@
+Backbone:
+    - user authentication (organization_code, email) 
+    - infinite canvas
+        - infinite scroll
+        - zoom
+        - pan
+        - isometric grid
+    - buttons
+    - sidebar
