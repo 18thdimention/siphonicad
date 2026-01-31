@@ -1,10 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { computeRowsFromComponents } from "@/components/calculate";
-import { supabase } from "@/lib/supabaseClient";
 import { type EquationRow } from "@/lib/calculations";
 import { utils as XLSXUtils, writeFile as writeXLSXFile } from "xlsx";
 
@@ -527,35 +525,17 @@ function initWebGL(canvas: HTMLCanvasElement): GLResources | null {
 
 export default function IsometricCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
-  const projectId = searchParams.get("projectId");
-  const fileId = searchParams.get("fileId");
-  const exportAction = searchParams.get("export");
-  const hasProjectContext = !!projectId;
 
   const handleBack = () => {
-    const orgIdFromQuery = searchParams.get("orgId");
-    let targetOrgId: string | null = orgIdFromQuery;
-
-    if (!targetOrgId && typeof window !== "undefined") {
-      const stored = window.localStorage.getItem("currentOrgId");
-      targetOrgId = stored ?? null;
-    }
-
-    if (targetOrgId && projectId) {
-      router.push(`/orgs/${targetOrgId}/projects/${projectId}`);
-    } else {
-      // Fallback if we don't know the org or project context
-      router.push("/");
+    // Reload the page to clear the current drawing.
+    if (typeof window !== "undefined") {
+      window.location.reload();
     }
   };
 
   const [fileName, setFileName] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [loadedFileId, setLoadedFileId] = useState<string | null>(null);
 
   // Pan/zoom state (original infinite canvas behavior)
   const [zoom, setZoom] = useState(0.7);
@@ -738,58 +718,6 @@ export default function IsometricCanvas() {
   const [ghostEnd, setGhostEnd] = useState<Point | null>(null);
   const nextIdRef = useRef(1);
 
-  // Load an existing canvas from the database when a fileId is present in the URL.
-  useEffect(() => {
-    if (!fileId || fileId === loadedFileId) return;
-
-    const load = async () => {
-      try {
-        const { data, error } = await supabase
-          .from("project_files")
-          .select("name, data")
-          .eq("id", fileId)
-          .single();
-
-        if (error) {
-          console.error("Error loading canvas file", error);
-          return;
-        }
-
-        const canvas = data?.data as CanvasJson | null;
-        if (!canvas || !Array.isArray(canvas.components)) return;
-
-        const loadedNodes: Node[] = [];
-        const loadedEdges: Edge[] = [];
-        const newOrder: { component: ComponentKind; id: number }[] = [];
-
-        for (const comp of canvas.components as CanvasComponent[]) {
-          if (comp.component === "node") {
-            const { component, ...node } = comp;
-            loadedNodes.push(node as Node);
-          } else if (comp.component === "edge") {
-            const { component, ...edge } = comp;
-            loadedEdges.push(edge as Edge);
-          }
-          newOrder.push({ component: comp.component, id: comp.id });
-        }
-
-        setNodes(loadedNodes);
-        setEdges(loadedEdges);
-        setComponentOrder(newOrder);
-
-        const maxNodeId = loadedNodes.reduce((max, n) => Math.max(max, n.id), 0);
-        const maxEdgeId = loadedEdges.reduce((max, e) => Math.max(max, e.id), 0);
-        nextIdRef.current = Math.max(maxNodeId, maxEdgeId, 0) + 1;
-
-        setFileName(data?.name ?? "");
-        setLoadedFileId(fileId);
-      } catch (err) {
-        console.error("Unexpected error loading canvas file", err);
-      }
-    };
-
-    load();
-  }, [fileId, loadedFileId]);
 
   // We no longer maintain a separate trailing tee entry in componentOrder.
   // When splitting a pipe, we only insert the new node between the two new
@@ -3111,11 +3039,10 @@ export default function IsometricCanvas() {
     }
   };
 
-  const handleSave = async () => {
-    if (!hasProjectContext) {
-      setSaveMessage(
-        "Open this canvas from a project to save in Supabase, or use Export to download JSON."
-      );
+  const handleSave = () => {
+    if (!canvasJson.components.length) {
+      setSaveMessage("Nothing to save yet – draw something first.");
+      setTimeout(() => setSaveMessage(null), 3000);
       return;
     }
 
@@ -3134,71 +3061,28 @@ export default function IsometricCanvas() {
         setFileName(name);
       }
 
-      if (!fileId) {
-        const { data, error } = await supabase
-          .from("project_files")
-          .insert({
-            project_id: projectId,
-            name,
-            data: canvasJson,
-          })
-          .select("id")
-          .single();
+      const blob = new Blob([JSON.stringify(canvasJson, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${name}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
 
-        if (error) throw error;
-
-        const newId = (data as { id: string }).id;
-        setLoadedFileId(newId);
-
-        // Update the URL so future saves update the same file
-        const params = new URLSearchParams(searchParams.toString());
-        params.set("projectId", projectId);
-        params.set("fileId", newId);
-        router.replace(`?${params.toString()}`);
-
-        setSaveMessage("Saved");
-      } else {
-        const { error } = await supabase
-          .from("project_files")
-          .update({
-            name,
-            data: canvasJson,
-          })
-          .eq("id", fileId);
-
-        if (error) throw error;
-        setSaveMessage("Saved");
-      }
+      setSaveMessage("Downloaded JSON");
     } catch (error) {
       console.error("Error saving canvas", error);
       setSaveMessage("Error saving");
     } finally {
       setIsSaving(false);
-      // Clear the message after a short delay
       setTimeout(() => setSaveMessage(null), 3000);
     }
   };
 
-  // Auto-trigger exports when opened from an org project file card with an
-  // `export` query param (equations / quantities only).
-  useEffect(() => {
-    if (!exportAction) return;
-    if (!canvasJson.components.length || !equationRowGroups.length) return;
-
-    if (exportAction === "equations") {
-      handleExportGoogleSheets();
-    } else if (exportAction === "quantities") {
-      handleExportQuantities();
-    }
-
-    // Remove the export param from the URL so repeated interactions don't
-    // retrigger the export.
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("export");
-      router.replace(url.toString());
-    }
-  }, [exportAction, canvasJson.components.length, equationRowGroups.length]);
 
   const handleOpenCalculate = () => {
     // Previously we forced all diameters/lengths/capacities to be filled
@@ -3951,16 +3835,10 @@ export default function IsometricCanvas() {
           </button>
         </div>
 
-        {saveMessage ? (
+        {saveMessage && (
           <p className="text-[10px] text-muted-foreground">
             {saveMessage}
           </p>
-        ) : (
-          !hasProjectContext && (
-            <p className="text-[10px] text-muted-foreground">
-              Open the canvas from a project if you want to save in Supabase. You can always use Export without a project.
-            </p>
-          )
         )}
 
         {/* Legend removed from canvas UI; see /documentation for symbol guide. */}
